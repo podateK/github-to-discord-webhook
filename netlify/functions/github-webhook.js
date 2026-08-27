@@ -89,6 +89,19 @@ function buildDiscordMessage(event, payload) {
       };
     }
 
+    case "ping": {
+      return {
+        embeds: [
+          {
+            title: `✅ Webhook podłączony pomyślnie!`,
+            description: `**${repo}**\nZen: _${payload.zen}_`,
+            color: 0x9b59b6,
+            footer: { text: `Skonfigurowane przez ${sender}` },
+          },
+        ],
+      };
+    }
+
     default: {
       return {
         embeds: [
@@ -125,8 +138,9 @@ export default async (req, context) => {
   const payload = JSON.parse(rawBody);
 
   if (event === "ping") {
-    console.log("Otrzymano ping od GitHuba - webhook skonfigurowany poprawnie");
-    return new Response("pong", { status: 200 });
+    console.log(
+      "Otrzymano ping od GitHuba - webhook skonfigurowany poprawnie, wysyłam potwierdzenie na Discorda",
+    );
   }
 
   const discordMessage = buildDiscordMessage(event, payload);
