@@ -1,42 +1,23 @@
-import express from "express";
 import crypto from "crypto";
-import "dotenv/config";
 
-const app = express();
-
-// Discord webhook URL - ustawcie w zmiennej środowiskowej DISCORD_WEBHOOK_URL
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-// Opcjonalny secret ustawiony w konfiguracji webhooka na GitHubie (zalecane, dla weryfikacji podpisu)
 const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
 
-if (!DISCORD_WEBHOOK_URL) {
-  console.error("Brak DISCORD_WEBHOOK_URL w zmiennych środowiskowych!");
-  process.exit(1);
-}
-
-// GitHub wysyła surowe body jako JSON, ale potrzebujemy raw bufora do weryfikacji podpisu
-app.use(
-  express.json({
-    verify: (req, res, buf) => {
-      req.rawBody = buf;
-    },
-  }),
-);
-
-// Weryfikacja podpisu X-Hub-Signature-256 (żeby nikt obcy nie mógł podszyć się pod webhook)
-function verifySignature(req) {
+// Weryfikacja podpisu X-Hub-Signature-256, żeby nikt obcy nie mógł podszyć się pod GitHuba
+function verifySignature(rawBody, signature) {
   if (!GITHUB_WEBHOOK_SECRET) return true; // brak secreta = pomijamy weryfikację
-
-  const signature = req.headers["x-hub-signature-256"];
   if (!signature) return false;
 
   const hmac = crypto.createHmac("sha256", GITHUB_WEBHOOK_SECRET);
-  const digest = "sha256=" + hmac.update(req.rawBody).digest("hex");
+  const digest = "sha256=" + hmac.update(rawBody).digest("hex");
 
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+  } catch {
+    return false; // różne długości bufora itp.
+  }
 }
 
-// Budowanie ładnej wiadomości na Discorda w zależności od typu eventu
 function buildDiscordMessage(event, payload) {
   const repo = payload.repository?.full_name || "nieznane repo";
   const sender = payload.sender?.login || "ktoś";
@@ -54,7 +35,6 @@ function buildDiscordMessage(event, payload) {
         .join("\n");
 
       return {
-        content: null,
         embeds: [
           {
             title: `📦 Push do ${repo} (${branch})`,
@@ -110,7 +90,6 @@ function buildDiscordMessage(event, payload) {
     }
 
     default: {
-      // Fallback dla dowolnego innego typu eventu - wysyłamy surowe info
       return {
         embeds: [
           {
@@ -124,18 +103,30 @@ function buildDiscordMessage(event, payload) {
   }
 }
 
-app.post("/webhook/github", async (req, res) => {
-  if (!verifySignature(req)) {
-    return res.status(401).send("Nieprawidłowy podpis");
+// Netlify Functions (format nowszy - "Netlify Functions v2" / standardowy Request/Response)
+export default async (req, context) => {
+  if (req.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
   }
 
-  const event = req.headers["x-github-event"] || "unknown";
-  const payload = req.body;
+  if (!DISCORD_WEBHOOK_URL) {
+    console.error("Brak DISCORD_WEBHOOK_URL w zmiennych środowiskowych!");
+    return new Response("Brak konfiguracji serwera", { status: 500 });
+  }
 
-  // Ping event wysyłany przy dodaniu webhooka - potwierdzamy że działa
+  const rawBody = await req.text();
+  const signature = req.headers.get("x-hub-signature-256");
+
+  if (!verifySignature(rawBody, signature)) {
+    return new Response("Nieprawidłowy podpis", { status: 401 });
+  }
+
+  const event = req.headers.get("x-github-event") || "unknown";
+  const payload = JSON.parse(rawBody);
+
   if (event === "ping") {
     console.log("Otrzymano ping od GitHuba - webhook skonfigurowany poprawnie");
-    return res.status(200).send("pong");
+    return new Response("pong", { status: 200 });
   }
 
   const discordMessage = buildDiscordMessage(event, payload);
@@ -150,25 +141,15 @@ app.post("/webhook/github", async (req, res) => {
     if (!response.ok) {
       const text = await response.text();
       console.error("Discord odrzucił wiadomość:", response.status, text);
-      return res.status(502).send("Błąd przy wysyłce do Discorda");
+      return new Response("Błąd przy wysyłce do Discorda", { status: 502 });
     }
 
     console.log(
       `Przekazano event "${event}" z ${payload.repository?.full_name} na Discorda`,
     );
-    res.status(200).send("OK");
+    return new Response("OK", { status: 200 });
   } catch (err) {
     console.error("Błąd wysyłki do Discorda:", err);
-    res.status(500).send("Błąd serwera");
+    return new Response("Błąd serwera", { status: 500 });
   }
-});
-
-// Prosty health check
-app.get("/", (req, res) => {
-  res.send("GitHub → Discord webhook relay działa ✅");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Serwer nasłuchuje na porcie ${PORT}`);
-});
+};
